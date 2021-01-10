@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use math::round;
 use uuid::Uuid;
 
 #[derive(Debug, PartialEq)]
@@ -13,7 +13,7 @@ enum LogEntry {
 }
 
 struct Peer {
-    address: Ipv4Addr,
+    id: Uuid,
     term: u64,
     state: State,
 }
@@ -37,6 +37,16 @@ struct RequestVoteResponseRpc {
     vote_granted: bool,
 }
 
+trait RpcServer {
+    fn broadcast_request_vote_rpc(
+        &self,
+        peers: &Vec<Peer>,
+        request: RequestVoteRequestRpc,
+    ) -> Vec<RequestVoteResponseRpc>;
+
+    fn broadcast_log_entry_rpc(&self, peers: &Vec<Peer>, log_entry: &LogEntry);
+}
+
 impl Server {
     fn new() -> Self {
         Server {
@@ -46,6 +56,32 @@ impl Server {
             peers: Vec::new(),
             log_entries: Vec::new(),
             voted_for: None,
+        }
+    }
+
+    // This is the core dump for the leader election algorithm, that is yet to be
+    // refined. Please do not judge the quality of the code at this point in time :)
+    fn start_election(mut self: &mut Self, rpc_server: &impl RpcServer) {
+        self.term = self.term + 1;
+        self.state = State::CANDIDATE;
+        self.voted_for = Some(Peer {
+            id: self.id,
+            term: self.term,
+            state: State::CANDIDATE,
+        });
+
+        let request_vote_rpc = RequestVoteRequestRpc {
+            term: self.term,
+            candidate_id: self.id,
+        };
+
+        let rpc_response = rpc_server.broadcast_request_vote_rpc(&self.peers, request_vote_rpc);
+
+        let votes = rpc_response.iter().filter(|r| r.vote_granted).count();
+
+        if votes > (round::floor(self.peers.len() as f64, 2) as usize) {
+            self.state = State::LEADER;
+            rpc_server.broadcast_log_entry_rpc(&self.peers, &LogEntry::HEARTBEAT);
         }
     }
 }
@@ -63,5 +99,10 @@ mod tests {
         assert_eq!(server.peers.len(), 0);
         assert_eq!(server.log_entries.len(), 0);
         assert!(server.voted_for.is_none());
+    }
+
+    fn start_election() {
+        // TODO: Implemeting test cases
+        let server = Server::new();
     }
 }

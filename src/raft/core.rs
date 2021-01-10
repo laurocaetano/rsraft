@@ -18,7 +18,7 @@ impl Server {
         Server {
             id: Uuid::new_v4(),
             state: State::FOLLOWER,
-            term: 1,
+            term: 0,
         }
     }
 }
@@ -31,7 +31,7 @@ mod tests {
     fn new_server() {
         let server = Server::new();
 
-        assert_eq!(server.term, 1);
+        assert_eq!(server.term, 0);
         assert_eq!(server.state, State::FOLLOWER);
     }
 }

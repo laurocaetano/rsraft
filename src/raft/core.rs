@@ -9,7 +9,7 @@ enum State {
 }
 
 enum LogEntry {
-    HEARTBEAT,
+    Heartbeat { term: u64, peer_id: Uuid },
 }
 
 struct Peer {
@@ -59,6 +59,17 @@ impl Server {
         }
     }
 
+    fn consume_log_entry(self: &mut Self, log_entry: &LogEntry) {
+        match log_entry {
+            LogEntry::Heartbeat { term, peer_id } => {
+                if term > &self.term {
+                    self.term = *term;
+                    self.state = State::FOLLOWER;
+                }
+            }
+        }
+    }
+
     // This is the core dump for the leader election algorithm, that is yet to be
     // refined. Please do not judge the quality of the code at this point in time :)
     fn start_election(self: &mut Self, rpc_server: &impl RpcServer) {
@@ -89,7 +100,13 @@ impl Server {
 
         if (votes + 1) > min_quorum as usize {
             self.state = State::LEADER;
-            rpc_server.broadcast_log_entry_rpc(&self.peers, &LogEntry::HEARTBEAT);
+            rpc_server.broadcast_log_entry_rpc(
+                &self.peers,
+                &LogEntry::Heartbeat {
+                    term: self.term,
+                    peer_id: self.id,
+                },
+            );
         }
 
         self.voted_for = None;
@@ -113,6 +130,26 @@ mod tests {
         assert_eq!(server.peers.len(), 0);
         assert_eq!(server.log_entries.len(), 0);
         assert!(server.voted_for.is_none());
+    }
+
+    #[test]
+    fn consume_log_entry() {
+        let mut server = Server::new();
+
+        // Simulate that the server is the current leader
+        server.state = State::LEADER;
+
+        // Simulate that a new leader was elected
+        let new_leader_current_term = 44;
+        let log_entry = LogEntry::Heartbeat {
+            term: new_leader_current_term,
+            peer_id: Uuid::new_v4(),
+        };
+
+        server.consume_log_entry(&log_entry);
+
+        assert_eq!(server.state, State::FOLLOWER);
+        assert_eq!(server.term, new_leader_current_term);
     }
 
     #[test]

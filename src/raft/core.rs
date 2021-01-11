@@ -1,4 +1,5 @@
 use math::round;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 #[derive(Debug, PartialEq)]
@@ -12,6 +13,7 @@ enum LogEntry {
     Heartbeat { term: u64, peer_id: Uuid },
 }
 
+#[derive(Debug, PartialEq)]
 struct Peer {
     id: Uuid,
     term: u64,
@@ -25,6 +27,8 @@ struct Server {
     peers: Vec<Peer>,
     log_entries: Vec<LogEntry>,
     voted_for: Option<Peer>,
+    next_timeout: Instant,
+    timeout_config: Duration,
 }
 
 struct RequestVoteRequestRpc {
@@ -56,6 +60,8 @@ impl Server {
             peers: Vec::new(),
             log_entries: Vec::new(),
             voted_for: None,
+            timeout_config: Duration::new(1, 0),
+            next_timeout: Instant::now() + Duration::new(1, 0),
         }
     }
 
@@ -98,8 +104,18 @@ impl Server {
 
         let min_quorum = round::floor((number_of_servers / 2) as f64, 0);
 
+        // If election times out, abort the current one and starts a new one.
+        // For now it just returns, but the timeout logic is still to be implemented.
+        if Instant::now() > self.next_timeout {
+            self.next_timeout = Instant::now() + self.timeout_config;
+            return;
+        }
+
         if (votes + 1) > min_quorum as usize {
+            let max_nanoseconds = u64::MAX / 1_000_000_000;
+            self.next_timeout = Instant::now() + Duration::new(max_nanoseconds, 0);
             self.state = State::LEADER;
+
             rpc_server.broadcast_log_entry_rpc(
                 &self.peers,
                 &LogEntry::Heartbeat {
@@ -108,8 +124,6 @@ impl Server {
                 },
             );
         }
-
-        self.voted_for = None;
     }
 
     fn add_peer(self: &mut Self, peer: Peer) {
@@ -120,6 +134,7 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread::sleep;
 
     #[test]
     fn new_server() {
@@ -155,9 +170,18 @@ mod tests {
     #[test]
     fn start_election() {
         let mut server = Server::new();
-        let successful_rpcs = FakeRpc { granted_vote: true };
+        let successful_rpcs = FakeRpc {
+            granted_vote: true,
+            sleeps_for: Duration::new(0, 0),
+        };
         let not_successful_rpcs = FakeRpc {
             granted_vote: false,
+            sleeps_for: Duration::new(0, 0),
+        };
+
+        let timed_out = FakeRpc {
+            granted_vote: true,
+            sleeps_for: Duration::new(1, 0),
         };
 
         create_peers(3, &mut server);
@@ -165,19 +189,28 @@ mod tests {
 
         assert_eq!(server.state, State::CANDIDATE);
         assert_eq!(server.term, 1);
+        assert_eq!(server.voted_for.as_ref().unwrap().id, server.id);
 
         server.start_election(&not_successful_rpcs);
         assert_eq!(server.state, State::CANDIDATE);
         assert_eq!(server.term, 2);
+        assert_eq!(server.voted_for.as_ref().unwrap().id, server.id);
+
+        server.start_election(&timed_out);
+        assert_eq!(server.state, State::CANDIDATE);
+        assert_eq!(server.term, 3);
+        assert_eq!(server.voted_for.as_ref().unwrap().id, server.id);
 
         server.start_election(&successful_rpcs);
         assert_eq!(server.state, State::LEADER);
-        assert_eq!(server.term, 3);
+        assert_eq!(server.term, 4);
+        assert_eq!(server.voted_for.as_ref().unwrap().id, server.id);
 
         // Starting a new election as a leader should not trigger election
         server.start_election(&successful_rpcs);
         assert_eq!(server.state, State::LEADER);
-        assert_eq!(server.term, 3);
+        assert_eq!(server.term, 4);
+        assert_eq!(server.voted_for.as_ref().unwrap().id, server.id);
     }
 
     fn create_peers(n: u32, server: &mut Server) {
@@ -192,6 +225,7 @@ mod tests {
 
     struct FakeRpc {
         granted_vote: bool,
+        sleeps_for: Duration,
     }
 
     impl RpcServer for FakeRpc {
@@ -209,6 +243,7 @@ mod tests {
                 });
             }
 
+            sleep(self.sleeps_for);
             response
         }
 

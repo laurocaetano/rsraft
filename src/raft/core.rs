@@ -61,7 +61,11 @@ impl Server {
 
     // This is the core dump for the leader election algorithm, that is yet to be
     // refined. Please do not judge the quality of the code at this point in time :)
-    fn start_election(mut self: &mut Self, rpc_server: &impl RpcServer) {
+    fn start_election(self: &mut Self, rpc_server: &impl RpcServer) {
+        if self.state == State::LEADER {
+            return;
+        }
+
         self.term = self.term + 1;
         self.state = State::CANDIDATE;
         self.voted_for = Some(Peer {
@@ -77,12 +81,22 @@ impl Server {
 
         let rpc_response = rpc_server.broadcast_request_vote_rpc(&self.peers, request_vote_rpc);
 
+        let number_of_servers = self.peers.len() + 1; // All peers + current server
+
         let votes = rpc_response.iter().filter(|r| r.vote_granted).count();
 
-        if votes > (round::floor(self.peers.len() as f64, 2) as usize) {
+        let min_quorum = round::floor((number_of_servers / 2) as f64, 0);
+
+        if (votes + 1) > min_quorum as usize {
             self.state = State::LEADER;
             rpc_server.broadcast_log_entry_rpc(&self.peers, &LogEntry::HEARTBEAT);
         }
+
+        self.voted_for = None;
+    }
+
+    fn add_peer(self: &mut Self, peer: Peer) {
+        self.peers.push(peer);
     }
 }
 
@@ -101,8 +115,68 @@ mod tests {
         assert!(server.voted_for.is_none());
     }
 
+    #[test]
     fn start_election() {
-        // TODO: Implemeting test cases
-        let server = Server::new();
+        let mut server = Server::new();
+        let successful_rpcs = FakeRpc { granted_vote: true };
+        let not_successful_rpcs = FakeRpc {
+            granted_vote: false,
+        };
+
+        create_peers(3, &mut server);
+        server.start_election(&not_successful_rpcs);
+
+        assert_eq!(server.state, State::CANDIDATE);
+        assert_eq!(server.term, 1);
+
+        server.start_election(&not_successful_rpcs);
+        assert_eq!(server.state, State::CANDIDATE);
+        assert_eq!(server.term, 2);
+
+        server.start_election(&successful_rpcs);
+        assert_eq!(server.state, State::LEADER);
+        assert_eq!(server.term, 3);
+
+        // Starting a new election as a leader should not trigger election
+        server.start_election(&successful_rpcs);
+        assert_eq!(server.state, State::LEADER);
+        assert_eq!(server.term, 3);
+    }
+
+    fn create_peers(n: u32, server: &mut Server) {
+        for _ in 0..n {
+            server.add_peer(Peer {
+                id: Uuid::new_v4(),
+                term: 0,
+                state: State::FOLLOWER,
+            });
+        }
+    }
+
+    struct FakeRpc {
+        granted_vote: bool,
+    }
+
+    impl RpcServer for FakeRpc {
+        fn broadcast_request_vote_rpc(
+            &self,
+            peers: &Vec<Peer>,
+            _request: RequestVoteRequestRpc,
+        ) -> Vec<RequestVoteResponseRpc> {
+            let mut response = Vec::new();
+
+            for peer in peers.iter() {
+                response.push(RequestVoteResponseRpc {
+                    term: peer.term,
+                    vote_granted: self.granted_vote,
+                });
+            }
+
+            response
+        }
+
+        fn broadcast_log_entry_rpc(&self, _peers: &Vec<Peer>, _log_entry: &LogEntry) {
+            println!("broadcast");
+        }
     }
 }

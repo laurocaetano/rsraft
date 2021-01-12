@@ -20,15 +20,19 @@ struct Peer {
     state: State,
 }
 
-struct Server {
+pub struct ServerConfig {
+    pub timeout: Duration,
+}
+
+pub struct Server {
     id: Uuid,
     state: State,
     term: u64,
     peers: Vec<Peer>,
     log_entries: Vec<LogEntry>,
     voted_for: Option<Peer>,
-    next_timeout: Instant,
-    timeout_config: Duration,
+    next_timeout: Option<Instant>,
+    config: ServerConfig,
 }
 
 struct RequestVoteRequestRpc {
@@ -52,7 +56,7 @@ trait RpcServer {
 }
 
 impl Server {
-    fn new() -> Self {
+    fn new(config: ServerConfig) -> Self {
         Server {
             id: Uuid::new_v4(),
             state: State::FOLLOWER,
@@ -60,14 +64,14 @@ impl Server {
             peers: Vec::new(),
             log_entries: Vec::new(),
             voted_for: None,
-            timeout_config: Duration::new(1, 0),
-            next_timeout: Instant::now() + Duration::new(1, 0),
+            next_timeout: None,
+            config: config,
         }
     }
 
     fn consume_log_entry(self: &mut Self, log_entry: &LogEntry) {
         match log_entry {
-            LogEntry::Heartbeat { term, peer_id } => {
+            LogEntry::Heartbeat { term, peer_id: _ } => {
                 if term > &self.term {
                     self.term = *term;
                     self.state = State::FOLLOWER;
@@ -106,14 +110,17 @@ impl Server {
 
         // If election times out, abort the current one and starts a new one.
         // For now it just returns, but the timeout logic is still to be implemented.
-        if Instant::now() > self.next_timeout {
-            self.next_timeout = Instant::now() + self.timeout_config;
-            return;
+        if let Some(t) = self.next_timeout {
+            if Instant::now() > t {
+                return;
+            }
         }
 
-        if (votes + 1) > min_quorum as usize {
-            let max_nanoseconds = u64::MAX / 1_000_000_000;
-            self.next_timeout = Instant::now() + Duration::new(max_nanoseconds, 0);
+        println!("RETURN");
+
+        // State could have been changed to Follower concurrently.
+        if (votes + 1) > min_quorum as usize && State::CANDIDATE == self.state {
+            self.next_timeout = None;
             self.state = State::LEADER;
 
             rpc_server.broadcast_log_entry_rpc(
@@ -129,6 +136,17 @@ impl Server {
     fn add_peer(self: &mut Self, peer: Peer) {
         self.peers.push(peer);
     }
+
+    fn start(self: &mut Self) {
+        self.next_timeout = Some(Instant::now() + self.config.timeout);
+    }
+}
+
+pub fn start_server(config: ServerConfig) -> Server {
+    let mut server = Server::new(config);
+    server.start();
+
+    server
 }
 
 #[cfg(test)]
@@ -138,7 +156,9 @@ mod tests {
 
     #[test]
     fn new_server() {
-        let server = Server::new();
+        let server = Server::new(ServerConfig {
+            timeout: Duration::new(0, 0),
+        });
 
         assert_eq!(server.term, 0);
         assert_eq!(server.state, State::FOLLOWER);
@@ -149,7 +169,9 @@ mod tests {
 
     #[test]
     fn consume_log_entry() {
-        let mut server = Server::new();
+        let mut server = Server::new(ServerConfig {
+            timeout: Duration::new(0, 0),
+        });
 
         // Simulate that the server is the current leader
         server.state = State::LEADER;
@@ -169,7 +191,12 @@ mod tests {
 
     #[test]
     fn start_election() {
-        let mut server = Server::new();
+        let server_timeout = Duration::new(1, 0);
+
+        let mut server = Server::new(ServerConfig {
+            timeout: server_timeout,
+        });
+
         let successful_rpcs = FakeRpc {
             granted_vote: true,
             sleeps_for: Duration::new(0, 0),
@@ -181,32 +208,37 @@ mod tests {
 
         let timed_out = FakeRpc {
             granted_vote: true,
-            sleeps_for: Duration::new(1, 0),
+            sleeps_for: server_timeout + Duration::new(1, 0),
         };
 
         create_peers(3, &mut server);
+        server.start();
         server.start_election(&not_successful_rpcs);
 
         assert_eq!(server.state, State::CANDIDATE);
         assert_eq!(server.term, 1);
         assert_eq!(server.voted_for.as_ref().unwrap().id, server.id);
 
+        server.start();
         server.start_election(&not_successful_rpcs);
         assert_eq!(server.state, State::CANDIDATE);
         assert_eq!(server.term, 2);
         assert_eq!(server.voted_for.as_ref().unwrap().id, server.id);
 
+        server.start();
         server.start_election(&timed_out);
         assert_eq!(server.state, State::CANDIDATE);
         assert_eq!(server.term, 3);
         assert_eq!(server.voted_for.as_ref().unwrap().id, server.id);
 
+        server.start();
         server.start_election(&successful_rpcs);
         assert_eq!(server.state, State::LEADER);
         assert_eq!(server.term, 4);
         assert_eq!(server.voted_for.as_ref().unwrap().id, server.id);
 
         // Starting a new election as a leader should not trigger election
+        server.start();
         server.start_election(&successful_rpcs);
         assert_eq!(server.state, State::LEADER);
         assert_eq!(server.term, 4);

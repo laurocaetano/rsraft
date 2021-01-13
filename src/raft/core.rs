@@ -129,9 +129,33 @@ pub fn start_server<T: RpcServer + std::marker::Sync>(config: ServerConfig) {
     server.start();
 }
 
+fn start_election(server: &mut Server, rpc_server: impl RpcServer) {
+    let rpc_response = match server.start_election() {
+        Some(r) => Some(rpc_server.broadcast_request_vote_rpc(&server.peers, r)),
+        None => None,
+    };
+
+    if let Some(rpc_response) = rpc_response {
+        if has_won_the_election(server, rpc_response) && !server.has_timed_out() {
+            server.become_leader();
+        }
+    }
+}
+
+fn has_won_the_election(server: &Server, response: Vec<VoteRequestResponse>) -> bool {
+    let number_of_servers = server.peers.len() + 1; // All peers + current server
+
+    let votes = response.iter().filter(|r| r.vote_granted).count();
+
+    let min_quorum = round::floor((number_of_servers / 2) as f64, 0);
+
+    (votes + 1) > min_quorum as usize && State::CANDIDATE == server.state
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread::sleep;
 
     #[test]
     fn new_server() {
@@ -147,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn start_election() {
+    fn start_election_ut() {
         let mut server = Server::new(ServerConfig {
             timeout: Duration::new(10, 0),
         });
@@ -211,5 +235,65 @@ mod tests {
 
         assert_eq!(server.state, State::FOLLOWER);
         assert_eq!(server.term, new_leader_current_term);
+    }
+
+    #[test]
+    fn start_election_it() {
+        let fake_rpc = FakeRpc {
+            granted_vote: true,
+            sleeps_for: Duration::new(0, 0),
+        };
+
+        let mut server = Server::new(ServerConfig {
+            timeout: Duration::new(2, 0),
+        });
+
+        server.peers = create_peers(3);
+        server.start();
+
+        start_election(&mut server, fake_rpc);
+
+        assert_eq!(server.state, State::LEADER);
+    }
+
+    fn create_peers(n: usize) -> Vec<Peer> {
+        let mut peers = Vec::new();
+
+        for _ in 0..n {
+            peers.push(Peer {
+                id: Uuid::new_v4(),
+                term: 0,
+                state: State::FOLLOWER,
+            });
+        }
+
+        peers
+    }
+    struct FakeRpc {
+        granted_vote: bool,
+        sleeps_for: Duration,
+    }
+
+    impl RpcServer for FakeRpc {
+        fn broadcast_request_vote_rpc(
+            &self,
+            peers: &Vec<Peer>,
+            _request: VoteRequest,
+        ) -> Vec<VoteRequestResponse> {
+            let mut response = Vec::new();
+
+            for peer in peers.iter() {
+                response.push(VoteRequestResponse {
+                    term: peer.term,
+                    vote_granted: self.granted_vote,
+                });
+            }
+            sleep(self.sleeps_for);
+            response
+        }
+
+        fn broadcast_log_entry_rpc(&self, _peers: &Vec<Peer>, _log_entry: &LogEntry) {
+            println!("broadcast");
+        }
     }
 }

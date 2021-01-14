@@ -24,11 +24,7 @@ fn create_peers(n: usize) -> Vec<core::Peer> {
     let mut peers = Vec::new();
 
     for _ in 0..n {
-        peers.push(core::Peer {
-            id: Uuid::new_v4(),
-            term: 0,
-            state: core::State::FOLLOWER,
-        });
+        peers.push(core::Peer { id: Uuid::new_v4() });
     }
 
     peers
@@ -42,13 +38,13 @@ impl core::RpcServer for FakeRpc {
     fn broadcast_request_vote_rpc(
         &self,
         peers: &Vec<core::Peer>,
-        _request: core::VoteRequest,
+        request: core::VoteRequest,
     ) -> Vec<core::VoteRequestResponse> {
         let mut response = Vec::new();
 
-        for peer in peers.iter() {
+        for _peer in peers.iter() {
             response.push(core::VoteRequestResponse {
-                term: peer.term,
+                term: request.term,
                 vote_granted: self.granted_vote,
             });
         }

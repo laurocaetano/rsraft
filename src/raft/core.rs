@@ -20,8 +20,12 @@ pub enum LogEntry {
 #[derive(Debug)]
 pub struct Peer {
     pub id: Uuid,
+}
+
+#[derive(Debug)]
+pub struct Leader {
+    pub id: Uuid,
     pub term: u64,
-    pub state: State,
 }
 
 #[derive(Debug)]
@@ -39,6 +43,7 @@ struct Server {
     voted_for: Option<Peer>,
     next_timeout: Option<Instant>,
     config: ServerConfig,
+    current_leader: Option<Leader>,
 }
 
 pub struct VoteRequest {
@@ -72,17 +77,48 @@ impl Server {
             voted_for: None,
             next_timeout: None,
             config: config,
+            current_leader: None,
         }
     }
 
     fn consume_log_entry(self: &mut Self, log_entry: &LogEntry) {
         match log_entry {
-            LogEntry::Heartbeat { term, peer_id: _ } => {
-                self.next_timeout = Some(Instant::now() + self.config.timeout);
-
+            LogEntry::Heartbeat { term, peer_id } => {
                 if term > &self.term {
+                    self.refresh_timeout();
                     self.term = *term;
                     self.state = State::FOLLOWER;
+                    self.voted_for = None;
+                    self.current_leader = Some(Leader {
+                        id: *peer_id,
+                        term: *term,
+                    })
+                }
+            }
+        }
+    }
+
+    fn handle_vote_request(self: &mut Self, vote_request: VoteRequest) -> VoteRequestResponse {
+        match self.voted_for {
+            Some(_) => VoteRequestResponse {
+                term: vote_request.term,
+                vote_granted: false,
+            },
+            None => {
+                if vote_request.term > self.term {
+                    self.voted_for = Some(Peer {
+                        id: vote_request.candidate_id,
+                    });
+
+                    VoteRequestResponse {
+                        term: vote_request.term,
+                        vote_granted: true,
+                    }
+                } else {
+                    VoteRequestResponse {
+                        term: vote_request.term,
+                        vote_granted: false,
+                    }
                 }
             }
         }
@@ -100,11 +136,7 @@ impl Server {
         self.state = State::CANDIDATE;
         self.term = self.term + 1;
         self.refresh_timeout();
-        self.voted_for = Some(Peer {
-            id: self.id,
-            term: self.term,
-            state: State::CANDIDATE,
-        });
+        self.voted_for = Some(Peer { id: self.id });
 
         Some(VoteRequest {
             term: self.term,
@@ -263,6 +295,60 @@ mod tests {
     }
 
     #[test]
+    fn handle_vote_request() {
+        let mut server = Server::new(ServerConfig {
+            timeout: Duration::new(0, 0),
+        });
+
+        server.start();
+
+        let candidate_id = Uuid::new_v4();
+
+        let vote_request = VoteRequest {
+            candidate_id: candidate_id,
+            term: server.term + 1,
+        };
+
+        let vote_response = server.handle_vote_request(vote_request);
+
+        assert_eq!(vote_response.term, server.term + 1);
+        assert!(vote_response.vote_granted);
+        assert_eq!(server.voted_for.as_ref().unwrap().id, candidate_id);
+
+        // Now the server has already voted for that term
+
+        let candidate_id = Uuid::new_v4();
+
+        let vote_request = VoteRequest {
+            candidate_id: candidate_id,
+            term: server.term + 1,
+        };
+
+        let vote_response = server.handle_vote_request(vote_request);
+
+        assert_eq!(vote_response.term, server.term + 1);
+        assert!(!vote_response.vote_granted);
+        assert_ne!(server.voted_for.as_ref().unwrap().id, candidate_id);
+
+        // When the server did not vote yet, but the candidate's term is the same
+        // as the current server.
+        server.voted_for = None;
+
+        let candidate_id = Uuid::new_v4();
+
+        let vote_request = VoteRequest {
+            candidate_id: candidate_id,
+            term: server.term,
+        };
+
+        let vote_response = server.handle_vote_request(vote_request);
+
+        assert_eq!(vote_response.term, server.term);
+        assert!(!vote_response.vote_granted);
+        assert!(server.voted_for.as_ref().is_none());
+    }
+
+    #[test]
     fn consume_log_entry() {
         let mut server = Server::new(ServerConfig {
             timeout: Duration::new(0, 0),
@@ -307,11 +393,7 @@ mod tests {
         let mut peers = Vec::new();
 
         for _ in 0..n {
-            peers.push(Peer {
-                id: Uuid::new_v4(),
-                term: 0,
-                state: State::FOLLOWER,
-            });
+            peers.push(Peer { id: Uuid::new_v4() });
         }
 
         peers
@@ -325,13 +407,13 @@ mod tests {
         fn broadcast_request_vote_rpc(
             &self,
             peers: &Vec<Peer>,
-            _request: VoteRequest,
+            request: VoteRequest,
         ) -> Vec<VoteRequestResponse> {
             let mut response = Vec::new();
 
-            for peer in peers.iter() {
+            for _peer in peers.iter() {
                 response.push(VoteRequestResponse {
-                    term: peer.term,
+                    term: request.term,
                     vote_granted: self.granted_vote,
                 });
             }

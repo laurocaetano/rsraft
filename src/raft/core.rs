@@ -1,4 +1,7 @@
 use math::round;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -9,20 +12,24 @@ pub enum State {
     CANDIDATE,
 }
 
+#[derive(Debug)]
 pub enum LogEntry {
     Heartbeat { term: u64, peer_id: Uuid },
 }
 
+#[derive(Debug)]
 pub struct Peer {
     pub id: Uuid,
     pub term: u64,
     pub state: State,
 }
 
+#[derive(Debug)]
 pub struct ServerConfig {
     pub timeout: Duration,
 }
 
+#[derive(Debug)]
 struct Server {
     id: Uuid,
     state: State,
@@ -124,19 +131,59 @@ impl Server {
     }
 }
 
-pub fn start_server<T: RpcServer + std::marker::Sync>(config: ServerConfig) {
-    let mut server = Server::new(config);
-    server.start();
+pub fn start_server(
+    config: ServerConfig,
+    rpc_server: impl RpcServer + std::marker::Send + 'static,
+    peers: Vec<Peer>,
+) {
+    let server = Arc::new(Mutex::new(Server::new(config)));
+    let server_clone = Arc::clone(&server);
+
+    server.lock().unwrap().peers = peers;
+    server.lock().unwrap().start();
+
+    let timeout_handle = thread::spawn(|| {
+        handle_timeout(server_clone, rpc_server);
+    });
+
+    let server_clone = Arc::clone(&server);
+    let heartbeat_handle = thread::spawn(|| {
+        listen_to_heartbeats(server_clone);
+    });
+
+    timeout_handle.join().unwrap();
+    heartbeat_handle.join().unwrap();
 }
 
-fn start_election(server: &mut Server, rpc_server: impl RpcServer) {
+fn listen_to_heartbeats(_server: Arc<Mutex<Server>>) {}
+
+fn handle_timeout(server: Arc<Mutex<Server>>, rpc_server: impl RpcServer) {
+    println!("Handling timeout");
+
+    let server_clone = Arc::clone(&server);
+
+    loop {
+        if server_clone.lock().unwrap().has_timed_out() {
+            println!("Timed out");
+            start_election(&mut server_clone.lock().unwrap(), &rpc_server);
+        }
+    }
+}
+
+fn start_election(server: &mut Server, rpc_server: &impl RpcServer) {
+    println!("Started Election");
+
     let rpc_response = match server.start_election() {
         Some(r) => Some(rpc_server.broadcast_request_vote_rpc(&server.peers, r)),
         None => None,
     };
 
+    println!("Current state: {:#?}", server);
+
     if let Some(rpc_response) = rpc_response {
         if has_won_the_election(server, rpc_response) && !server.has_timed_out() {
+            println!("Has won the election!");
+
             server.become_leader();
         }
     }
@@ -251,7 +298,7 @@ mod tests {
         server.peers = create_peers(3);
         server.start();
 
-        start_election(&mut server, fake_rpc);
+        start_election(&mut server, &fake_rpc);
 
         assert_eq!(server.state, State::LEADER);
     }

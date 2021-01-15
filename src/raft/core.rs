@@ -1,4 +1,5 @@
 use math::round;
+use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
@@ -38,12 +39,12 @@ struct Server {
     id: Uuid,
     state: State,
     term: u64,
-    peers: Vec<Peer>,
     log_entries: Vec<LogEntry>,
     voted_for: Option<Peer>,
     next_timeout: Option<Instant>,
     config: ServerConfig,
     current_leader: Option<Leader>,
+    number_of_peers: usize,
 }
 
 pub struct VoteRequest {
@@ -57,13 +58,9 @@ pub struct VoteRequestResponse {
 }
 
 pub trait RpcServer {
-    fn broadcast_request_vote_rpc(
-        &self,
-        peers: &Vec<Peer>,
-        request: VoteRequest,
-    ) -> Vec<VoteRequestResponse>;
+    fn broadcast_request_vote_rpc(&self, request: VoteRequest) -> Vec<VoteRequestResponse>;
 
-    fn broadcast_log_entry_rpc(&self, peers: &Vec<Peer>, log_entry: &LogEntry);
+    fn broadcast_log_entry_rpc(&self, log_entry: &LogEntry);
 }
 
 impl Server {
@@ -72,12 +69,12 @@ impl Server {
             id: Uuid::new_v4(),
             state: State::FOLLOWER,
             term: 0,
-            peers: Vec::new(),
             log_entries: Vec::new(),
             voted_for: None,
             next_timeout: None,
             config: config,
             current_leader: None,
+            number_of_peers: 0,
         }
     }
 
@@ -85,6 +82,8 @@ impl Server {
         match log_entry {
             LogEntry::Heartbeat { term, peer_id } => {
                 if term > &self.term {
+                    println!("Server {} becoming follower.", self.id);
+
                     self.refresh_timeout();
                     self.term = *term;
                     self.state = State::FOLLOWER;
@@ -166,12 +165,13 @@ impl Server {
 pub fn start_server(
     config: ServerConfig,
     rpc_server: impl RpcServer + std::marker::Send + 'static,
-    peers: Vec<Peer>,
+    log_entry_receiver: Receiver<LogEntry>,
+    number_of_peers: usize,
 ) {
     let server = Arc::new(Mutex::new(Server::new(config)));
     let server_clone = Arc::clone(&server);
 
-    server.lock().unwrap().peers = peers;
+    server.lock().unwrap().number_of_peers = number_of_peers;
     server.lock().unwrap().start();
 
     let timeout_handle = thread::spawn(|| {
@@ -179,50 +179,76 @@ pub fn start_server(
     });
 
     let server_clone = Arc::clone(&server);
+
     let heartbeat_handle = thread::spawn(|| {
-        listen_to_heartbeats(server_clone);
+        listen_to_heartbeats(server_clone, log_entry_receiver);
     });
 
     timeout_handle.join().unwrap();
     heartbeat_handle.join().unwrap();
 }
 
-fn listen_to_heartbeats(_server: Arc<Mutex<Server>>) {}
-
-fn handle_timeout(server: Arc<Mutex<Server>>, rpc_server: impl RpcServer) {
-    println!("Handling timeout");
-
-    let server_clone = Arc::clone(&server);
+fn listen_to_heartbeats(server: Arc<Mutex<Server>>, recv: Receiver<LogEntry>) {
+    let mut iter = recv.iter();
 
     loop {
-        if server_clone.lock().unwrap().has_timed_out() {
-            println!("Timed out");
-            start_election(&mut server_clone.lock().unwrap(), &rpc_server);
+        let server_clone = Arc::clone(&server);
+        if let Some(entry) = iter.next() {
+            println!(
+                "Server {} has received heartbeat.",
+                server_clone.lock().unwrap().id
+            );
+            server_clone.lock().unwrap().consume_log_entry(&entry);
         }
     }
 }
 
-fn start_election(server: &mut Server, rpc_server: &impl RpcServer) {
-    println!("Started Election");
+fn handle_timeout(server: Arc<Mutex<Server>>, rpc_server: impl RpcServer) {
+    loop {
+        let server_clone = Arc::clone(&server);
+        let server_id = server_clone.lock().unwrap().id;
 
-    let rpc_response = match server.start_election() {
-        Some(r) => Some(rpc_server.broadcast_request_vote_rpc(&server.peers, r)),
-        None => None,
-    };
+        if server_clone.lock().unwrap().has_timed_out() {
+            println!("Server {} has timed out.", server_id);
 
-    println!("Current state: {:#?}", server);
+            start_election(Arc::clone(&server_clone), &rpc_server);
+        }
+    }
+}
 
-    if let Some(rpc_response) = rpc_response {
-        if has_won_the_election(server, rpc_response) && !server.has_timed_out() {
-            println!("Has won the election!");
+fn start_election(server: Arc<Mutex<Server>>, rpc_server: &impl RpcServer) {
+    let rpc_response: Option<Vec<VoteRequestResponse>>;
+    let rpc_request = server.lock().unwrap().start_election();
+    let server_id = server.lock().unwrap().id;
+    println!("Server {} started election.", server_id);
 
-            server.become_leader();
+    {
+        rpc_response = match rpc_request {
+            Some(r) => {
+                println!("Server {} requesting votes.", server_id);
+                Some(rpc_server.broadcast_request_vote_rpc(r))
+            }
+            None => None,
+        };
+    }
+
+    if let Some(r) = rpc_response {
+        let own_election;
+        {
+            let mut server = server.lock().unwrap();
+
+            own_election = has_won_the_election(&server, r) && !server.has_timed_out();
+        }
+
+        if own_election {
+            println!("Server {} has won the election!", server_id);
+            server.lock().unwrap().become_leader();
         }
     }
 }
 
 fn has_won_the_election(server: &Server, response: Vec<VoteRequestResponse>) -> bool {
-    let number_of_servers = server.peers.len() + 1; // All peers + current server
+    let number_of_servers = server.number_of_peers + 1; // All peers + current server
 
     let votes = response.iter().filter(|r| r.vote_granted).count();
 

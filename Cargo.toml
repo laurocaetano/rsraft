@@ -9,3 +9,4 @@ edition = "2018"
 [dependencies]
 uuid = { version = "0.8", features = ["v4"] }
 libmath = "0.2.1"
+rand = "0.8.2"

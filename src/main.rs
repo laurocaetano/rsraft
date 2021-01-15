@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 fn main() {
     let server_config = core::ServerConfig {
-        timeout: Duration::new(4, 0),
+        timeout: Duration::new(10, 0),
     };
 
     let (send, recv) = channel();

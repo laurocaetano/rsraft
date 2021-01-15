@@ -270,7 +270,7 @@ mod tests {
 
         assert_eq!(server.term, 0);
         assert_eq!(server.state, State::FOLLOWER);
-        assert_eq!(server.peers.len(), 0);
+        assert_eq!(server.number_of_peers, 0);
         assert_eq!(server.log_entries.len(), 0);
         assert!(server.voted_for.is_none());
     }
@@ -398,21 +398,26 @@ mod tests {
 
     #[test]
     fn start_election_it() {
+        let peers = create_peers(3);
+
         let fake_rpc = FakeRpc {
             granted_vote: true,
             sleeps_for: Duration::new(0, 0),
+            peers: peers,
         };
 
         let mut server = Server::new(ServerConfig {
             timeout: Duration::new(2, 0),
         });
 
-        server.peers = create_peers(3);
         server.start();
+        server.number_of_peers = 3;
 
-        start_election(&mut server, &fake_rpc);
+        let server = Arc::new(Mutex::new(server));
 
-        assert_eq!(server.state, State::LEADER);
+        start_election(Arc::clone(&server), &fake_rpc);
+
+        assert_eq!(server.lock().unwrap().state, State::LEADER);
     }
 
     fn create_peers(n: usize) -> Vec<Peer> {
@@ -424,20 +429,18 @@ mod tests {
 
         peers
     }
+
     struct FakeRpc {
         granted_vote: bool,
         sleeps_for: Duration,
+        peers: Vec<Peer>,
     }
 
     impl RpcServer for FakeRpc {
-        fn broadcast_request_vote_rpc(
-            &self,
-            peers: &Vec<Peer>,
-            request: VoteRequest,
-        ) -> Vec<VoteRequestResponse> {
+        fn broadcast_request_vote_rpc(&self, request: VoteRequest) -> Vec<VoteRequestResponse> {
             let mut response = Vec::new();
 
-            for _peer in peers.iter() {
+            for _peer in self.peers.iter() {
                 response.push(VoteRequestResponse {
                     term: request.term,
                     vote_granted: self.granted_vote,
@@ -447,7 +450,7 @@ mod tests {
             response
         }
 
-        fn broadcast_log_entry_rpc(&self, _peers: &Vec<Peer>, _log_entry: &LogEntry) {
+        fn broadcast_log_entry_rpc(&self, _log_entry: &LogEntry) {
             println!("broadcast");
         }
     }

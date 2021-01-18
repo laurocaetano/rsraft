@@ -57,10 +57,14 @@ pub struct VoteRequestResponse {
     pub vote_granted: bool,
 }
 
-pub trait RpcServer {
-    fn broadcast_request_vote_rpc(&self, request: VoteRequest) -> Vec<VoteRequestResponse>;
+pub trait RpcClient {
+    fn request_vote(&self, request: VoteRequest) -> Vec<VoteRequestResponse>;
 
-    fn broadcast_log_entry_rpc(&self, log_entry: &LogEntry);
+    fn broadcast_log_entry(&self, log_entry: &LogEntry);
+}
+
+pub trait RpcServer {
+    fn handle_vote_request(&self);
 }
 
 impl Server {
@@ -164,7 +168,7 @@ impl Server {
 
 pub fn start_server(
     config: ServerConfig,
-    rpc_server: impl RpcServer + std::marker::Send + 'static,
+    rpc_server: impl RpcClient + std::marker::Send + 'static,
     log_entry_receiver: Receiver<LogEntry>,
     number_of_peers: usize,
 ) {
@@ -180,15 +184,15 @@ pub fn start_server(
 
     let server_clone = Arc::clone(&server);
 
-    let heartbeat_handle = thread::spawn(|| {
-        listen_to_heartbeats(server_clone, log_entry_receiver);
+    let log_entry_handle = thread::spawn(|| {
+        handle_log_entries(server_clone, log_entry_receiver);
     });
 
     timeout_handle.join().unwrap();
-    heartbeat_handle.join().unwrap();
+    log_entry_handle.join().unwrap();
 }
 
-fn listen_to_heartbeats(server: Arc<Mutex<Server>>, recv: Receiver<LogEntry>) {
+fn handle_log_entries(server: Arc<Mutex<Server>>, recv: Receiver<LogEntry>) {
     let mut iter = recv.iter();
 
     loop {
@@ -203,7 +207,7 @@ fn listen_to_heartbeats(server: Arc<Mutex<Server>>, recv: Receiver<LogEntry>) {
     }
 }
 
-fn handle_timeout(server: Arc<Mutex<Server>>, rpc_server: impl RpcServer) {
+fn handle_timeout(server: Arc<Mutex<Server>>, rpc_server: impl RpcClient) {
     loop {
         let server_clone = Arc::clone(&server);
         let server_id = server_clone.lock().unwrap().id;
@@ -216,7 +220,7 @@ fn handle_timeout(server: Arc<Mutex<Server>>, rpc_server: impl RpcServer) {
     }
 }
 
-fn start_election(server: Arc<Mutex<Server>>, rpc_server: &impl RpcServer) {
+fn start_election(server: Arc<Mutex<Server>>, rpc_server: &impl RpcClient) {
     let rpc_response: Option<Vec<VoteRequestResponse>>;
     let rpc_request = server.lock().unwrap().start_election();
     let server_id = server.lock().unwrap().id;
@@ -226,7 +230,7 @@ fn start_election(server: Arc<Mutex<Server>>, rpc_server: &impl RpcServer) {
         rpc_response = match rpc_request {
             Some(r) => {
                 println!("Server {} requesting votes.", server_id);
-                Some(rpc_server.broadcast_request_vote_rpc(r))
+                Some(rpc_server.request_vote(r))
             }
             None => None,
         };
@@ -436,8 +440,8 @@ mod tests {
         peers: Vec<Peer>,
     }
 
-    impl RpcServer for FakeRpc {
-        fn broadcast_request_vote_rpc(&self, request: VoteRequest) -> Vec<VoteRequestResponse> {
+    impl RpcClient for FakeRpc {
+        fn request_vote(&self, request: VoteRequest) -> Vec<VoteRequestResponse> {
             let mut response = Vec::new();
 
             for _peer in self.peers.iter() {
@@ -450,7 +454,7 @@ mod tests {
             response
         }
 
-        fn broadcast_log_entry_rpc(&self, _log_entry: &LogEntry) {
+        fn broadcast_log_entry(&self, _log_entry: &LogEntry) {
             println!("broadcast");
         }
     }

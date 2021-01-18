@@ -64,11 +64,8 @@ struct FakeRpc {
     peers: Vec<core::Peer>,
 }
 
-impl core::RpcServer for FakeRpc {
-    fn broadcast_request_vote_rpc(
-        &self,
-        request: core::VoteRequest,
-    ) -> Vec<core::VoteRequestResponse> {
+impl core::RpcClient for FakeRpc {
+    fn request_vote(&self, request: core::VoteRequest) -> Vec<core::VoteRequestResponse> {
         let mut response = Vec::new();
 
         for _peer in self.peers.iter() {
@@ -81,7 +78,7 @@ impl core::RpcServer for FakeRpc {
         response
     }
 
-    fn broadcast_log_entry_rpc(&self, _log_entry: &core::LogEntry) {
+    fn broadcast_log_entry(&self, _log_entry: &core::LogEntry) {
         println!("broadcast");
     }
 }

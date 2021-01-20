@@ -1,10 +1,20 @@
 use math::round;
+use serde::{Deserialize, Serialize};
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum RpcMessage {
+    VoteRequest { term: u64, candidate_id: Uuid },
+    VoteResponse { term: u64, vote_granted: bool },
+    Heartbeat { term: u64, peer_id: Uuid },
+    HeartbeatResponse { term: u64, peer_id: Uuid },
+}
 
 #[derive(Debug, PartialEq)]
 pub enum State {
@@ -13,7 +23,7 @@ pub enum State {
     CANDIDATE,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum LogEntry {
     Heartbeat { term: u64, peer_id: Uuid },
 }
@@ -21,6 +31,7 @@ pub enum LogEntry {
 #[derive(Debug)]
 pub struct Peer {
     pub id: Uuid,
+    pub address: SocketAddrV4,
 }
 
 #[derive(Debug)]
@@ -47,6 +58,7 @@ struct Server {
     number_of_peers: usize,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
 pub struct VoteRequest {
     pub term: u64,
     pub candidate_id: Uuid,
@@ -60,11 +72,11 @@ pub struct VoteRequestResponse {
 pub trait RpcClient {
     fn request_vote(&self, request: VoteRequest) -> Vec<VoteRequestResponse>;
 
-    fn broadcast_log_entry(&self, log_entry: &LogEntry);
+    fn broadcast_log_entry(&self, log_entry: LogEntry);
 }
 
 pub trait RpcServer {
-    fn handle_vote_request(&self);
+    fn start_server(&self, address: SocketAddrV4);
 }
 
 impl Server {
@@ -111,6 +123,7 @@ impl Server {
                 if vote_request.term > self.term {
                     self.voted_for = Some(Peer {
                         id: vote_request.candidate_id,
+                        address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7879),
                     });
 
                     VoteRequestResponse {
@@ -139,7 +152,10 @@ impl Server {
         self.state = State::CANDIDATE;
         self.term = self.term + 1;
         self.refresh_timeout();
-        self.voted_for = Some(Peer { id: self.id });
+        self.voted_for = Some(Peer {
+            id: self.id,
+            address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7879),
+        });
 
         Some(VoteRequest {
             term: self.term,
@@ -237,6 +253,7 @@ fn start_election(server: Arc<Mutex<Server>>, rpc_server: &impl RpcClient) {
     }
 
     if let Some(r) = rpc_response {
+        println!("Response from election: {}", r.len());
         let own_election;
         {
             let mut server = server.lock().unwrap();

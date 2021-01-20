@@ -1,7 +1,12 @@
 mod raft;
 
 use raft::core;
+use raft::core::{RpcClient, RpcServer};
+use raft::tcp_rpc_client::TcpRpcClient;
+use raft::tcp_rpc_server::TcpRpcServer;
 use rand::{thread_rng, Rng};
+use std::convert::TryInto;
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::mpsc::channel;
 use std::thread;
 use std::thread::sleep;
@@ -10,10 +15,24 @@ use uuid::Uuid;
 
 fn main() {
     let server_config = core::ServerConfig {
-        timeout: Duration::new(10, 0),
+        timeout: Duration::new(3, 0),
     };
 
     let (send, recv) = channel();
+
+    let number_of_peers = 3;
+    let peers = create_peers(number_of_peers);
+
+    let mut servers = Vec::new();
+    for i in 0..number_of_peers {
+        servers.push(thread::spawn(move || {
+            let tcp_rpc_server = TcpRpcServer;
+            let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, (3300 + i).try_into().unwrap());
+            tcp_rpc_server.start_server(address);
+        }));
+    }
+
+    let tcp_rpc_client = TcpRpcClient::new(&peers);
 
     let fake_heartbeat_sender = thread::spawn(move || {
         let mut term = 1;
@@ -31,28 +50,23 @@ fn main() {
         }
     });
 
-    let peers = create_peers(3);
-    let number_of_peers = peers.len();
-
-    core::start_server(
-        server_config,
-        FakeRpc {
-            granted_vote: true,
-            sleeps_for: Duration::new(10, 0),
-            peers: peers,
-        },
-        recv,
-        number_of_peers,
-    );
+    core::start_server(server_config, tcp_rpc_client, recv, number_of_peers);
 
     fake_heartbeat_sender.join().unwrap();
+
+    for rpc_child in servers {
+        rpc_child.join().unwrap();
+    }
 }
 
 fn create_peers(n: usize) -> Vec<core::Peer> {
     let mut peers = Vec::new();
 
-    for _ in 0..n {
-        peers.push(core::Peer { id: Uuid::new_v4() });
+    for i in 0..n {
+        peers.push(core::Peer {
+            id: Uuid::new_v4(),
+            address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, (3300 + i).try_into().unwrap()),
+        });
     }
 
     peers
@@ -78,7 +92,7 @@ impl core::RpcClient for FakeRpc {
         response
     }
 
-    fn broadcast_log_entry(&self, _log_entry: &core::LogEntry) {
+    fn broadcast_log_entry(&self, _log_entry: core::LogEntry) {
         println!("broadcast");
     }
 }

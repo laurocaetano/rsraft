@@ -6,14 +6,13 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
-use uuid::Uuid;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RpcMessage {
-    VoteRequest { term: u64, candidate_id: Uuid },
+    VoteRequest { term: u64, candidate_id: String },
     VoteResponse { term: u64, vote_granted: bool },
-    Heartbeat { term: u64, peer_id: Uuid },
-    HeartbeatResponse { term: u64, peer_id: Uuid },
+    Heartbeat { term: u64, peer_id: String },
+    HeartbeatResponse { term: u64, peer_id: String },
 }
 
 #[derive(Debug, PartialEq)]
@@ -25,18 +24,18 @@ pub enum State {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum LogEntry {
-    Heartbeat { term: u64, peer_id: Uuid },
+    Heartbeat { term: u64, peer_id: String },
 }
 
 #[derive(Debug)]
 pub struct Peer {
-    pub id: Uuid,
+    pub id: String,
     pub address: SocketAddrV4,
 }
 
 #[derive(Debug)]
 pub struct Leader {
-    pub id: Uuid,
+    pub id: String,
     pub term: u64,
 }
 
@@ -46,8 +45,9 @@ pub struct ServerConfig {
 }
 
 #[derive(Debug)]
-struct Server {
-    id: Uuid,
+pub struct Server {
+    id: String,
+    address: SocketAddrV4,
     state: State,
     term: u64,
     log_entries: Vec<LogEntry>,
@@ -61,7 +61,7 @@ struct Server {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct VoteRequest {
     pub term: u64,
-    pub candidate_id: Uuid,
+    pub candidate_id: String,
 }
 
 pub struct VoteRequestResponse {
@@ -76,13 +76,18 @@ pub trait RpcClient {
 }
 
 pub trait RpcServer {
-    fn start_server(&self, address: SocketAddrV4);
+    fn start_server(&self);
 }
 
 impl Server {
-    fn new(config: ServerConfig) -> Self {
+    pub fn new(
+        config: ServerConfig,
+        number_of_peers: usize,
+        address: SocketAddrV4,
+        id: String,
+    ) -> Self {
         Server {
-            id: Uuid::new_v4(),
+            id: id,
             state: State::FOLLOWER,
             term: 0,
             log_entries: Vec::new(),
@@ -90,22 +95,27 @@ impl Server {
             next_timeout: None,
             config: config,
             current_leader: None,
-            number_of_peers: 0,
+            number_of_peers: number_of_peers,
+            address: address,
         }
     }
 
     fn consume_log_entry(self: &mut Self, log_entry: &LogEntry) {
         match log_entry {
             LogEntry::Heartbeat { term, peer_id } => {
-                if term > &self.term {
-                    println!("Server {} becoming follower.", self.id);
+                self.refresh_timeout();
 
-                    self.refresh_timeout();
+                if term > &self.term {
+                    println!(
+                        "Server {} becoming follower. The new leader is: {}",
+                        self.id, peer_id
+                    );
+
                     self.term = *term;
                     self.state = State::FOLLOWER;
                     self.voted_for = None;
                     self.current_leader = Some(Leader {
-                        id: *peer_id,
+                        id: peer_id.to_string(),
                         term: *term,
                     })
                 }
@@ -141,6 +151,7 @@ impl Server {
     }
 
     fn refresh_timeout(self: &mut Self) {
+        println!("Server {} is refreshing its timeout.", self.id);
         self.next_timeout = Some(Instant::now() + self.config.timeout);
     }
 
@@ -153,18 +164,22 @@ impl Server {
         self.term = self.term + 1;
         self.refresh_timeout();
         self.voted_for = Some(Peer {
-            id: self.id,
+            id: self.id.to_string(),
             address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7879),
         });
 
         Some(VoteRequest {
             term: self.term,
-            candidate_id: self.id,
+            candidate_id: self.id.to_string(),
         })
     }
 
     fn become_leader(self: &mut Self) {
         if self.state == State::CANDIDATE {
+            println!(
+                "Server {} has won the election! The new term is: {}",
+                self.id, self.term
+            );
             self.state = State::LEADER;
             self.next_timeout = None;
         }
@@ -182,78 +197,120 @@ impl Server {
     }
 }
 
-pub fn start_server(
-    config: ServerConfig,
-    rpc_server: impl RpcClient + std::marker::Send + 'static,
-    log_entry_receiver: Receiver<LogEntry>,
-    number_of_peers: usize,
-) {
-    let server = Arc::new(Mutex::new(Server::new(config)));
+pub fn handle_vote_request(
+    server: Arc<Mutex<Server>>,
+    request: VoteRequest,
+) -> VoteRequestResponse {
     let server_clone = Arc::clone(&server);
 
-    server.lock().unwrap().number_of_peers = number_of_peers;
+    let vote_response = server_clone.lock().unwrap().handle_vote_request(request);
+
+    vote_response
+}
+
+pub fn handle_heartbeat(server: Arc<Mutex<Server>>, entry: LogEntry) -> u64 {
+    let server_clone = Arc::clone(&server);
+
+    let server_id;
+    let server_term;
+
+    {
+        let temp_server = server_clone.lock().unwrap();
+        server_id = temp_server.id.to_string();
+        server_term = temp_server.term;
+    }
+
+    if let LogEntry::Heartbeat { term, peer_id } = entry {
+        println!(
+            "Server {} with term {}, received heartbeat from {} with term {}",
+            server_id, server_term, peer_id, term
+        );
+        server_clone
+            .lock()
+            .unwrap()
+            .consume_log_entry(&LogEntry::Heartbeat {
+                term: term,
+                peer_id: peer_id,
+            });
+    };
+
+    let current_term = server_clone.lock().unwrap().term;
+
+    current_term
+}
+
+pub fn start_server(
+    server: Arc<Mutex<Server>>,
+    rpc_client: impl RpcClient + std::marker::Send + 'static,
+) {
+    let server_clone = Arc::clone(&server);
+
     server.lock().unwrap().start();
 
-    let timeout_handle = thread::spawn(|| {
-        handle_timeout(server_clone, rpc_server);
+    let background_task_handle = thread::spawn(move || {
+        background_task(server_clone, &rpc_client);
     });
 
+    background_task_handle.join().unwrap();
+}
+
+fn background_task(server: Arc<Mutex<Server>>, rpc_client: &impl RpcClient) {
+    loop {
+        let clone = Arc::clone(&server);
+        handle_timeout(clone, rpc_client);
+
+        let clone = Arc::clone(&server);
+        broadcast_heartbeat(clone, rpc_client);
+    }
+}
+
+fn broadcast_heartbeat(server: Arc<Mutex<Server>>, rpc_client: &impl RpcClient) {
+    let clone = Arc::clone(&server);
+    let is_leader = clone.lock().unwrap().state == State::LEADER;
+
+    if is_leader {
+        let term = clone.lock().unwrap().term;
+        let id = clone.lock().unwrap().id.to_string();
+
+        rpc_client.broadcast_log_entry(LogEntry::Heartbeat {
+            term: term,
+            peer_id: id,
+        });
+    }
+
+    thread::sleep(Duration::new(1, 0));
+}
+
+fn handle_timeout(server: Arc<Mutex<Server>>, rpc_client: &impl RpcClient) {
     let server_clone = Arc::clone(&server);
+    let server_id = server_clone.lock().unwrap().id.to_string();
 
-    let log_entry_handle = thread::spawn(|| {
-        handle_log_entries(server_clone, log_entry_receiver);
-    });
+    if server_clone.lock().unwrap().has_timed_out() {
+        println!("Server {} has timed out.", server_id);
 
-    timeout_handle.join().unwrap();
-    log_entry_handle.join().unwrap();
-}
-
-fn handle_log_entries(server: Arc<Mutex<Server>>, recv: Receiver<LogEntry>) {
-    let mut iter = recv.iter();
-
-    loop {
-        let server_clone = Arc::clone(&server);
-        if let Some(entry) = iter.next() {
-            println!(
-                "Server {} has received heartbeat.",
-                server_clone.lock().unwrap().id
-            );
-            server_clone.lock().unwrap().consume_log_entry(&entry);
-        }
+        start_election(Arc::clone(&server_clone), rpc_client);
     }
 }
 
-fn handle_timeout(server: Arc<Mutex<Server>>, rpc_server: impl RpcClient) {
-    loop {
-        let server_clone = Arc::clone(&server);
-        let server_id = server_clone.lock().unwrap().id;
-
-        if server_clone.lock().unwrap().has_timed_out() {
-            println!("Server {} has timed out.", server_id);
-
-            start_election(Arc::clone(&server_clone), &rpc_server);
-        }
-    }
-}
-
-fn start_election(server: Arc<Mutex<Server>>, rpc_server: &impl RpcClient) {
+fn start_election(server: Arc<Mutex<Server>>, rpc_client: &impl RpcClient) {
     let rpc_response: Option<Vec<VoteRequestResponse>>;
     let rpc_request = server.lock().unwrap().start_election();
-    let server_id = server.lock().unwrap().id;
-    println!("Server {} started election.", server_id);
+    let server_id = server.lock().unwrap().id.to_string();
+    let server_term = server.lock().unwrap().term;
+
+    println!(
+        "Server {}, with term {}, started the election process.",
+        server_id, server_term
+    );
 
     {
         rpc_response = match rpc_request {
-            Some(r) => {
-                println!("Server {} requesting votes.", server_id);
-                Some(rpc_server.request_vote(r))
-            }
+            Some(r) => Some(rpc_client.request_vote(r)),
             None => None,
         };
     }
 
     if let Some(r) = rpc_response {
-        println!("Response from election: {}", r.len());
         let own_election;
         {
             let mut server = server.lock().unwrap();
@@ -262,8 +319,15 @@ fn start_election(server: Arc<Mutex<Server>>, rpc_server: &impl RpcClient) {
         }
 
         if own_election {
-            println!("Server {} has won the election!", server_id);
-            server.lock().unwrap().become_leader();
+            let clone = Arc::clone(&server);
+            let mut server = clone.lock().unwrap();
+            server.become_leader();
+            let log_entry = LogEntry::Heartbeat {
+                term: server.term,
+                peer_id: server.id.to_string(),
+            };
+
+            rpc_client.broadcast_log_entry(log_entry);
         }
     }
 }
@@ -349,7 +413,7 @@ mod tests {
 
         server.start();
 
-        let candidate_id = Uuid::new_v4();
+        let candidate_id = String::new_v4();
 
         let vote_request = VoteRequest {
             candidate_id: candidate_id,
@@ -364,7 +428,7 @@ mod tests {
 
         // Now the server has already voted for that term
 
-        let candidate_id = Uuid::new_v4();
+        let candidate_id = String::new_v4();
 
         let vote_request = VoteRequest {
             candidate_id: candidate_id,
@@ -381,7 +445,7 @@ mod tests {
         // as the current server.
         server.voted_for = None;
 
-        let candidate_id = Uuid::new_v4();
+        let candidate_id = String::new_v4();
 
         let vote_request = VoteRequest {
             candidate_id: candidate_id,
@@ -408,7 +472,7 @@ mod tests {
         let new_leader_current_term = 44;
         let log_entry = LogEntry::Heartbeat {
             term: new_leader_current_term,
-            peer_id: Uuid::new_v4(),
+            peer_id: String::new_v4(),
         };
 
         server.consume_log_entry(&log_entry);
@@ -445,7 +509,9 @@ mod tests {
         let mut peers = Vec::new();
 
         for _ in 0..n {
-            peers.push(Peer { id: Uuid::new_v4() });
+            peers.push(Peer {
+                id: String::new_v4(),
+            });
         }
 
         peers

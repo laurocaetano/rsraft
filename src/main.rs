@@ -1,98 +1,120 @@
 mod raft;
 
 use raft::core;
-use raft::core::{RpcClient, RpcServer};
+use raft::core::{RpcClient, RpcServer, Server};
 use raft::tcp_rpc_client::TcpRpcClient;
 use raft::tcp_rpc_server::TcpRpcServer;
 use rand::{thread_rng, Rng};
 use std::convert::TryInto;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::mpsc::channel;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::thread;
-use std::thread::sleep;
 use std::time::Duration;
-use uuid::Uuid;
 
 fn main() {
-    let server_config = core::ServerConfig {
-        timeout: Duration::new(3, 0),
-    };
+    let mut rpc_servers = Vec::new();
 
-    let (send, recv) = channel();
+    let address_1 = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 3300);
+    let server_1 = Arc::new(Mutex::new(Server::new(
+        core::ServerConfig {
+            timeout: Duration::new(5, 0),
+        },
+        2,
+        address_1,
+        "server_1".to_string(),
+    )));
+    let address_1_peers = vec![
+        core::Peer {
+            id: "server_2".to_string(),
+            address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 3301),
+        },
+        core::Peer {
+            id: "server_3".to_string(),
+            address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 3302),
+        },
+    ];
 
-    let number_of_peers = 3;
-    let peers = create_peers(number_of_peers);
+    rpc_servers.push(TcpRpcServer::new(Arc::clone(&server_1), address_1));
 
-    let mut servers = Vec::new();
-    for i in 0..number_of_peers {
-        servers.push(thread::spawn(move || {
-            let tcp_rpc_server = TcpRpcServer;
-            let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, (3300 + i).try_into().unwrap());
-            tcp_rpc_server.start_server(address);
+    let address_2 = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 3301);
+    let server_2 = Arc::new(Mutex::new(Server::new(
+        core::ServerConfig {
+            timeout: Duration::new(6, 0),
+        },
+        2,
+        address_2,
+        "server_2".to_string(),
+    )));
+    let address_2_peers = vec![
+        core::Peer {
+            id: "server_1".to_string(),
+            address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 3300),
+        },
+        core::Peer {
+            id: "server_3".to_string(),
+            address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 3302),
+        },
+    ];
+
+    rpc_servers.push(TcpRpcServer::new(Arc::clone(&server_2), address_2));
+
+    let address_3 = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 3302);
+    let server_3 = Arc::new(Mutex::new(Server::new(
+        core::ServerConfig {
+            timeout: Duration::new(7, 0),
+        },
+        2,
+        address_3,
+        "server_3".to_string(),
+    )));
+    let address_3_peers = vec![
+        core::Peer {
+            id: "server_1".to_string(),
+            address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 3300),
+        },
+        core::Peer {
+            id: "server_3".to_string(),
+            address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 3301),
+        },
+    ];
+
+    rpc_servers.push(TcpRpcServer::new(Arc::clone(&server_3), address_3));
+
+    let mut server_threads = Vec::new();
+    for rpc_server in rpc_servers {
+        server_threads.push(thread::spawn(move || {
+            rpc_server.start_server();
         }));
     }
 
-    let tcp_rpc_client = TcpRpcClient::new(&peers);
+    thread::sleep(Duration::new(1, 0));
+    let mut raft_servers_threads = Vec::new();
 
-    let fake_heartbeat_sender = thread::spawn(move || {
-        let mut term = 1;
+    raft_servers_threads.push(thread::spawn(move || {
+        let client = TcpRpcClient::new(&address_1_peers);
 
-        loop {
-            send.send(core::LogEntry::Heartbeat {
-                term: term,
-                peer_id: Uuid::new_v4(),
-            })
-            .unwrap();
+        core::start_server(Arc::clone(&server_1), client);
+    }));
 
-            thread::sleep(Duration::new(thread_rng().gen_range(1..10), 0));
+    raft_servers_threads.push(thread::spawn(move || {
+        let client = TcpRpcClient::new(&address_2_peers);
 
-            term = term + 1;
-        }
-    });
+        core::start_server(Arc::clone(&server_2), client);
+    }));
 
-    core::start_server(server_config, tcp_rpc_client, recv, number_of_peers);
+    raft_servers_threads.push(thread::spawn(move || {
+        let client = TcpRpcClient::new(&address_3_peers);
 
-    fake_heartbeat_sender.join().unwrap();
+        core::start_server(Arc::clone(&server_3), client);
+    }));
 
-    for rpc_child in servers {
-        rpc_child.join().unwrap();
-    }
-}
-
-fn create_peers(n: usize) -> Vec<core::Peer> {
-    let mut peers = Vec::new();
-
-    for i in 0..n {
-        peers.push(core::Peer {
-            id: Uuid::new_v4(),
-            address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, (3300 + i).try_into().unwrap()),
-        });
+    for st in server_threads {
+        st.join().unwrap();
     }
 
-    peers
-}
-
-struct FakeRpc {
-    granted_vote: bool,
-    sleeps_for: Duration,
-    peers: Vec<core::Peer>,
-}
-
-impl core::RpcClient for FakeRpc {
-    fn request_vote(&self, request: core::VoteRequest) -> Vec<core::VoteRequestResponse> {
-        let mut response = Vec::new();
-
-        for _peer in self.peers.iter() {
-            response.push(core::VoteRequestResponse {
-                term: request.term,
-                vote_granted: self.granted_vote,
-            });
-        }
-        sleep(self.sleeps_for);
-        response
-    }
-
-    fn broadcast_log_entry(&self, _log_entry: core::LogEntry) {
-        println!("broadcast");
+    for rs in raft_servers_threads {
+        rs.join().unwrap();
     }
 }

@@ -83,11 +83,11 @@ impl Server {
         }
     }
 
-    fn refresh_timeout(self: &mut Self) {
+    pub fn refresh_timeout(self: &mut Self) {
         self.next_timeout = Some(Instant::now() + self.config.timeout);
     }
 
-    fn become_leader(self: &mut Self) {
+    pub fn become_leader(self: &mut Self) {
         if self.state == State::CANDIDATE {
             println!(
                 "Server {} has won the election! The new term is: {}",
@@ -98,11 +98,11 @@ impl Server {
         }
     }
 
-    fn start(self: &mut Self) {
+    pub fn start(self: &mut Self) {
         self.refresh_timeout();
     }
 
-    fn has_timed_out(self: &mut Self) -> bool {
+    pub fn has_timed_out(self: &mut Self) -> bool {
         match self.next_timeout {
             Some(t) => Instant::now() > t,
             None => false,

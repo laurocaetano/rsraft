@@ -2,8 +2,40 @@ use crate::raft::types::{
     Leader, LogEntry, Peer, RpcClient, Server, State, VoteRequest, VoteResponse,
 };
 use math::round;
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::Arc;
 use std::sync::Mutex;
+
+pub fn handle_vote_request(server: Arc<Mutex<Server>>, request: VoteRequest) -> VoteResponse {
+    let server_clone = Arc::clone(&server);
+    let mut tmp_server = server_clone.lock().unwrap();
+
+    match tmp_server.voted_for {
+        Some(_) => VoteResponse {
+            term: request.term,
+            vote_granted: false,
+        },
+        None => {
+            if request.term > tmp_server.term {
+                tmp_server.voted_for = Some(Peer {
+                    id: request.candidate_id,
+                    // Fake address for now.
+                    address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7879),
+                });
+
+                VoteResponse {
+                    term: request.term,
+                    vote_granted: true,
+                }
+            } else {
+                VoteResponse {
+                    term: request.term,
+                    vote_granted: false,
+                }
+            }
+        }
+    }
+}
 
 pub fn handle_log_entry(server: Arc<Mutex<Server>>, entry: LogEntry) -> u64 {
     let server_clone = Arc::clone(&server);
@@ -255,6 +287,71 @@ mod tests {
             assert_eq!(tmp_server.state, State::FOLLOWER);
             assert_eq!(tmp_server.term, 19);
             assert!(tmp_server.next_timeout.as_ref().unwrap() > &Instant::now());
+        }
+    }
+
+    #[test]
+    fn raft_handle_vote_request() {
+        let server = Arc::new(Mutex::new(build_server()));
+        server.lock().unwrap().start();
+
+        let candidate_id = "server_2";
+
+        let vote_request = VoteRequest {
+            candidate_id: candidate_id.to_string(),
+            term: 1,
+        };
+
+        let vote_response = handle_vote_request(Arc::clone(&server), vote_request);
+
+        assert!(vote_response.vote_granted);
+        {
+            let tmp_server = server.lock().unwrap();
+            assert_eq!(vote_response.term, tmp_server.term + 1);
+            assert_eq!(
+                tmp_server.voted_for.as_ref().unwrap().id,
+                candidate_id.to_string()
+            );
+        }
+
+        // Now the server has already voted for that term
+        let new_candidate_id = "server_3";
+
+        let vote_request = VoteRequest {
+            candidate_id: new_candidate_id.to_string(),
+            term: 1,
+        };
+
+        let vote_response = handle_vote_request(Arc::clone(&server), vote_request);
+
+        assert!(!vote_response.vote_granted);
+        {
+            let tmp_server = server.lock().unwrap();
+            assert_ne!(
+                tmp_server.voted_for.as_ref().unwrap().id,
+                new_candidate_id.to_string()
+            );
+            assert_eq!(vote_response.term, tmp_server.term + 1);
+        }
+
+        // When the server did not vote yet, but the candidate's term is the same
+        // as the current server.
+        server.lock().unwrap().voted_for = None;
+
+        let another_candidate_id = "server_4";
+
+        let vote_request = VoteRequest {
+            candidate_id: another_candidate_id.to_string(),
+            term: server.lock().unwrap().term,
+        };
+
+        let vote_response = handle_vote_request(Arc::clone(&server), vote_request);
+
+        {
+            let tmp_server = server.lock().unwrap();
+            assert!(tmp_server.voted_for.as_ref().is_none());
+            assert_eq!(vote_response.term, tmp_server.term);
+            assert!(!vote_response.vote_granted);
         }
     }
 

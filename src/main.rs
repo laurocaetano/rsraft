@@ -1,3 +1,5 @@
 mod raft;
 
-fn main() {}
+fn main() {
+    crate::raft::demo::start_demo();
+}

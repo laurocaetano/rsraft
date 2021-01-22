@@ -5,6 +5,23 @@ use math::round;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::thread;
+use std::time::Duration;
+
+pub fn start_server(
+    server: Arc<Mutex<Server>>,
+    rpc_client: impl RpcClient + std::marker::Send + 'static,
+) {
+    let server_clone = Arc::clone(&server);
+
+    server.lock().unwrap().start();
+
+    let background_task_handle = thread::spawn(move || {
+        background_task(server_clone, &rpc_client);
+    });
+
+    background_task_handle.join().unwrap();
+}
 
 pub fn handle_vote_request(server: Arc<Mutex<Server>>, request: VoteRequest) -> VoteResponse {
     let server_clone = Arc::clone(&server);
@@ -78,6 +95,44 @@ pub fn handle_log_entry(server: Arc<Mutex<Server>>, entry: LogEntry) -> u64 {
     let current_term = server_clone.lock().unwrap().term;
 
     current_term
+}
+
+fn background_task(server: Arc<Mutex<Server>>, rpc_client: &impl RpcClient) {
+    loop {
+        let clone = Arc::clone(&server);
+        handle_timeout(clone, rpc_client);
+
+        let clone = Arc::clone(&server);
+        broadcast_heartbeat(clone, rpc_client);
+    }
+}
+
+fn broadcast_heartbeat(server: Arc<Mutex<Server>>, rpc_client: &impl RpcClient) {
+    let clone = Arc::clone(&server);
+    let is_leader = clone.lock().unwrap().state == State::LEADER;
+
+    if is_leader {
+        let term = clone.lock().unwrap().term;
+        let id = clone.lock().unwrap().id.to_string();
+
+        rpc_client.broadcast_log_entry(LogEntry::Heartbeat {
+            term: term,
+            peer_id: id,
+        });
+    }
+
+    thread::sleep(Duration::new(1, 0));
+}
+
+fn handle_timeout(server: Arc<Mutex<Server>>, rpc_client: &impl RpcClient) {
+    let server_clone = Arc::clone(&server);
+    let server_id = server_clone.lock().unwrap().id.to_string();
+
+    if server_clone.lock().unwrap().has_timed_out() {
+        println!("Server {} has timed out.", server_id);
+
+        new_election(Arc::clone(&server_clone), rpc_client);
+    }
 }
 
 fn new_election(server: Arc<Mutex<Server>>, rpc_client: &impl RpcClient) {

@@ -1,5 +1,6 @@
 use crate::raft::tcp_rpc::{TcpRpcClient, TcpRpcServer};
 use crate::raft::types::{Peer, Server, ServerConfig};
+use log::info;
 use rand::Rng;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::Arc;
@@ -92,7 +93,7 @@ pub fn start_demo() {
 
         {
             let tmp_server = server_1.lock().unwrap();
-            println!(
+            info!(
                 "The server {}, has a timeout of {} seconds.",
                 tmp_server.id,
                 tmp_server.config.timeout.as_secs()
@@ -107,7 +108,7 @@ pub fn start_demo() {
 
         {
             let tmp_server = server_2.lock().unwrap();
-            println!(
+            info!(
                 "The server {}, has a timeout of {} seconds.",
                 tmp_server.id,
                 tmp_server.config.timeout.as_secs()
@@ -121,7 +122,7 @@ pub fn start_demo() {
 
         {
             let tmp_server = server_3.lock().unwrap();
-            println!(
+            info!(
                 "The server {}, has a timeout of {} seconds.",
                 tmp_server.id,
                 tmp_server.config.timeout.as_secs()

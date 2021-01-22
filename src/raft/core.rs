@@ -1,6 +1,9 @@
+extern crate log;
+extern crate simplelog;
 use crate::raft::types::{
     Leader, LogEntry, Peer, RpcClient, Server, State, VoteRequest, VoteResponse,
 };
+use log::info;
 use math::round;
 use rand::Rng;
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -68,7 +71,7 @@ pub fn handle_log_entry(server: Arc<Mutex<Server>>, entry: LogEntry) -> u64 {
     }
 
     if let LogEntry::Heartbeat { term, peer_id } = entry {
-        println!(
+        info!(
             "Server {} with term {}, received heartbeat from {} with term {}",
             server_id, server_term, peer_id, term
         );
@@ -78,7 +81,7 @@ pub fn handle_log_entry(server: Arc<Mutex<Server>>, entry: LogEntry) -> u64 {
         server.refresh_timeout();
 
         if term > server.term {
-            println!(
+            info!(
                 "Server {} becoming follower. The new leader is: {}",
                 server.id, peer_id
             );
@@ -133,7 +136,7 @@ fn handle_timeout(server: Arc<Mutex<Server>>, rpc_client: &impl RpcClient) {
     let server_id = server_clone.lock().unwrap().id.to_string();
 
     if server_clone.lock().unwrap().has_timed_out() {
-        println!("Server {} has timed out.", server_id);
+        info!("Server {} has timed out.", server_id);
 
         new_election(Arc::clone(&server_clone), rpc_client);
     }
@@ -146,7 +149,7 @@ fn new_election(server: Arc<Mutex<Server>>, rpc_client: &impl RpcClient) {
     let server_id = server.lock().unwrap().id.to_string();
     let server_current_term = server.lock().unwrap().term;
 
-    println!(
+    info!(
         "Server {}, with term {}, started the election process.",
         server_id, server_current_term
     );
@@ -460,7 +463,7 @@ mod tests {
         }
 
         fn broadcast_log_entry(&self, _log_entry: LogEntry) {
-            println!("broadcast");
+            info!("broadcast");
         }
     }
 }

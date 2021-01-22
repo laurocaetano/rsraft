@@ -1,4 +1,5 @@
 use crate::raft::types::{LogEntry, Peer, RpcClient, Server, VoteRequest, VoteResponse};
+use log::info;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -98,7 +99,7 @@ impl TcpRpcServer {
     }
 
     pub fn start_server(&self) {
-        println!("Starting server at: {}...", self.address);
+        info!("Starting server at: {}...", self.address);
         let listener = TcpListener::bind(self.address).unwrap();
 
         for stream in listener.incoming() {
@@ -109,7 +110,7 @@ impl TcpRpcServer {
                     thread::spawn(move || handle_connection(Arc::clone(&server_clone), stream));
                 }
                 Err(e) => {
-                    println!("Error while listening to client: {}", e);
+                    info!("Error while listening to client: {}", e);
                 }
             }
         }

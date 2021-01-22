@@ -1,5 +1,6 @@
+use log::info;
 use serde::{Deserialize, Serialize};
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::SocketAddrV4;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, PartialEq)]
@@ -89,7 +90,7 @@ impl Server {
 
     pub fn become_leader(self: &mut Self) {
         if self.state == State::CANDIDATE {
-            println!(
+            info!(
                 "Server {} has won the election! The new term is: {}",
                 self.id, self.term
             );
@@ -113,6 +114,7 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
     use std::thread;
 
     #[test]

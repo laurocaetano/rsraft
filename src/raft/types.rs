@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddrV4;
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, PartialEq)]

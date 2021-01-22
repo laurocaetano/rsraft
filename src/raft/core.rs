@@ -2,6 +2,7 @@ use crate::raft::types::{
     Leader, LogEntry, Peer, RpcClient, Server, State, VoteRequest, VoteResponse,
 };
 use math::round;
+use rand::Rng;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -119,9 +120,12 @@ fn broadcast_heartbeat(server: Arc<Mutex<Server>>, rpc_client: &impl RpcClient) 
             term: term,
             peer_id: id,
         });
-    }
 
-    thread::sleep(Duration::new(1, 0));
+        // A touch of randomness, so that we can get the chance
+        // to have other leader elections.
+        let mut rng = rand::thread_rng();
+        thread::sleep(Duration::new(rng.gen_range(1..7), 0));
+    }
 }
 
 fn handle_timeout(server: Arc<Mutex<Server>>, rpc_client: &impl RpcClient) {

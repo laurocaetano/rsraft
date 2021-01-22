@@ -98,7 +98,7 @@ impl TcpRpcServer {
     }
 
     pub fn start_server(&self) {
-        println!("Starting server at: {} !", self.address);
+        println!("Starting server at: {}...", self.address);
         let listener = TcpListener::bind(self.address).unwrap();
 
         for stream in listener.incoming() {

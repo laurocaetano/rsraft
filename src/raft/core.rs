@@ -1,7 +1,52 @@
-use crate::raft::types::{LogEntry, Peer, RpcClient, Server, State, VoteRequest, VoteResponse};
+use crate::raft::types::{
+    Leader, LogEntry, Peer, RpcClient, Server, State, VoteRequest, VoteResponse,
+};
 use math::round;
 use std::sync::Arc;
 use std::sync::Mutex;
+
+pub fn handle_log_entry(server: Arc<Mutex<Server>>, entry: LogEntry) -> u64 {
+    let server_clone = Arc::clone(&server);
+
+    let server_id;
+    let server_term;
+
+    {
+        let temp_server = server_clone.lock().unwrap();
+        server_id = temp_server.id.to_string();
+        server_term = temp_server.term;
+    }
+
+    if let LogEntry::Heartbeat { term, peer_id } = entry {
+        println!(
+            "Server {} with term {}, received heartbeat from {} with term {}",
+            server_id, server_term, peer_id, term
+        );
+
+        let mut server = server.lock().unwrap();
+
+        server.refresh_timeout();
+
+        if term > server.term {
+            println!(
+                "Server {} becoming follower. The new leader is: {}",
+                server.id, peer_id
+            );
+
+            server.term = term;
+            server.state = State::FOLLOWER;
+            server.voted_for = None;
+            server.current_leader = Some(Leader {
+                id: peer_id.to_string(),
+                term: term,
+            })
+        }
+    };
+
+    let current_term = server_clone.lock().unwrap().term;
+
+    current_term
+}
 
 fn new_election(server: Arc<Mutex<Server>>, rpc_client: &impl RpcClient) {
     let vote_response: Option<Vec<VoteResponse>>;
@@ -91,7 +136,7 @@ mod tests {
     use crate::raft::types::ServerConfig;
     use std::net::{Ipv4Addr, SocketAddrV4};
     use std::thread::sleep;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn raft_new_election() {
@@ -164,6 +209,52 @@ mod tests {
             let tmp_server = server.lock().unwrap();
             assert_eq!(tmp_server.state, State::CANDIDATE);
             assert_eq!(tmp_server.term, 1);
+        }
+    }
+
+    #[test]
+    fn raft_handle_log_entry() {
+        // When the heartbeat contains a higher term
+        let server = Arc::new(Mutex::new(build_server()));
+        server.lock().unwrap().term = 10;
+
+        let log_entry = LogEntry::Heartbeat {
+            term: 19,
+            peer_id: "server_3".to_string(),
+        };
+
+        server.lock().unwrap().start();
+
+        handle_log_entry(Arc::clone(&server), log_entry);
+
+        {
+            let tmp_server = server.lock().unwrap();
+            assert_eq!(tmp_server.state, State::FOLLOWER);
+            assert_eq!(tmp_server.term, 19);
+            assert!(tmp_server.next_timeout.as_ref().unwrap() > &Instant::now());
+        }
+
+        // When the heartbeat contains a higher term
+        // and the current server is a Leader, then it
+        // becomes a follower.
+        let server = Arc::new(Mutex::new(build_server()));
+        server.lock().unwrap().state = State::LEADER;
+        server.lock().unwrap().term = 10;
+
+        let log_entry = LogEntry::Heartbeat {
+            term: 19,
+            peer_id: "server_3".to_string(),
+        };
+
+        server.lock().unwrap().start();
+
+        handle_log_entry(Arc::clone(&server), log_entry);
+
+        {
+            let tmp_server = server.lock().unwrap();
+            assert_eq!(tmp_server.state, State::FOLLOWER);
+            assert_eq!(tmp_server.term, 19);
+            assert!(tmp_server.next_timeout.as_ref().unwrap() > &Instant::now());
         }
     }
 

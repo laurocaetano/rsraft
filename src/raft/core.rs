@@ -16,20 +16,17 @@ pub fn start_server(
     server: Arc<Mutex<Server>>,
     rpc_client: impl RpcClient + std::marker::Send + 'static,
 ) {
-    let server_clone = Arc::clone(&server);
-
     server.lock().unwrap().start();
 
     let background_task_handle = thread::spawn(move || {
-        background_task(server_clone, &rpc_client);
+        background_task(server, &rpc_client);
     });
 
     background_task_handle.join().unwrap();
 }
 
 pub fn handle_vote_request(server: Arc<Mutex<Server>>, request: VoteRequest) -> VoteResponse {
-    let server_clone = Arc::clone(&server);
-    let mut tmp_server = server_clone.lock().unwrap();
+    let mut tmp_server = server.lock().unwrap();
 
     match tmp_server.voted_for {
         Some(_) => VoteResponse {
@@ -59,24 +56,13 @@ pub fn handle_vote_request(server: Arc<Mutex<Server>>, request: VoteRequest) -> 
 }
 
 pub fn handle_log_entry(server: Arc<Mutex<Server>>, entry: LogEntry) -> u64 {
-    let server_clone = Arc::clone(&server);
-
-    let server_id;
-    let server_term;
-
-    {
-        let temp_server = server_clone.lock().unwrap();
-        server_id = temp_server.id.to_string();
-        server_term = temp_server.term;
-    }
+    let mut server = server.lock().unwrap();
 
     if let LogEntry::Heartbeat { term, peer_id } = entry {
         info!(
             "Server {} with term {}, received heartbeat from {} with term {}",
-            server_id, server_term, peer_id, term
+            server.id, server.term, peer_id, term
         );
-
-        let mut server = server.lock().unwrap();
 
         server.refresh_timeout();
 
@@ -96,28 +82,24 @@ pub fn handle_log_entry(server: Arc<Mutex<Server>>, entry: LogEntry) -> u64 {
         }
     };
 
-    let current_term = server_clone.lock().unwrap().term;
+    let current_term = server.term;
 
     current_term
 }
 
 fn background_task(server: Arc<Mutex<Server>>, rpc_client: &impl RpcClient) {
     loop {
-        let clone = Arc::clone(&server);
-        handle_timeout(clone, rpc_client);
-
-        let clone = Arc::clone(&server);
-        broadcast_heartbeat(clone, rpc_client);
+        handle_timeout(Arc::clone(&server), rpc_client);
+        broadcast_heartbeat(Arc::clone(&server), rpc_client);
     }
 }
 
 fn broadcast_heartbeat(server: Arc<Mutex<Server>>, rpc_client: &impl RpcClient) {
-    let clone = Arc::clone(&server);
-    let is_leader = clone.lock().unwrap().state == State::LEADER;
+    let is_leader = server.lock().unwrap().state == State::LEADER;
 
     if is_leader {
-        let term = clone.lock().unwrap().term;
-        let id = clone.lock().unwrap().id.to_string();
+        let term = server.lock().unwrap().term;
+        let id = server.lock().unwrap().id.to_string();
 
         rpc_client.broadcast_log_entry(LogEntry::Heartbeat {
             term: term,
@@ -132,20 +114,18 @@ fn broadcast_heartbeat(server: Arc<Mutex<Server>>, rpc_client: &impl RpcClient) 
 }
 
 fn handle_timeout(server: Arc<Mutex<Server>>, rpc_client: &impl RpcClient) {
-    let server_clone = Arc::clone(&server);
-    let server_id = server_clone.lock().unwrap().id.to_string();
+    let server_id = server.lock().unwrap().id.to_string();
+    let has_timed_out = server.lock().unwrap().has_timed_out();
 
-    if server_clone.lock().unwrap().has_timed_out() {
+    if has_timed_out {
         info!("Server {} has timed out.", server_id);
 
-        new_election(Arc::clone(&server_clone), rpc_client);
+        new_election(Arc::clone(&server), rpc_client);
     }
 }
 
 fn new_election(server: Arc<Mutex<Server>>, rpc_client: &impl RpcClient) {
-    let vote_response: Option<Vec<VoteResponse>>;
     let vote_request = prepare_vote_request(Arc::clone(&server));
-
     let server_id = server.lock().unwrap().id.to_string();
     let server_current_term = server.lock().unwrap().term;
 
@@ -154,12 +134,10 @@ fn new_election(server: Arc<Mutex<Server>>, rpc_client: &impl RpcClient) {
         server_id, server_current_term
     );
 
-    {
-        vote_response = match vote_request {
-            Some(request) => Some(rpc_client.request_vote(request)),
-            None => None,
-        };
-    }
+    let vote_response = match vote_request {
+        Some(request) => Some(rpc_client.request_vote(request)),
+        None => None,
+    };
 
     if let Some(r) = vote_response {
         let own_election;
@@ -175,14 +153,12 @@ fn new_election(server: Arc<Mutex<Server>>, rpc_client: &impl RpcClient) {
 }
 
 fn prepare_vote_request(server: Arc<Mutex<Server>>) -> Option<VoteRequest> {
-    let server_clone = Arc::clone(&server);
-
-    if server_clone.lock().unwrap().state == State::LEADER {
+    if server.lock().unwrap().state == State::LEADER {
         return None;
     }
 
     {
-        let mut server_tmp = server_clone.lock().unwrap();
+        let mut server_tmp = server.lock().unwrap();
         server_tmp.state = State::CANDIDATE;
         server_tmp.term = server_tmp.term + 1;
         server_tmp.refresh_timeout();
@@ -192,8 +168,9 @@ fn prepare_vote_request(server: Arc<Mutex<Server>>) -> Option<VoteRequest> {
         });
     }
 
-    let new_term = server_clone.lock().unwrap().term;
-    let id = server_clone.lock().unwrap().id.to_string();
+    let new_term = server.lock().unwrap().term;
+    let id = server.lock().unwrap().id.to_string();
+
     Some(VoteRequest {
         term: new_term,
         candidate_id: id,
@@ -211,8 +188,7 @@ fn has_won_the_election(server: &Server, response: Vec<VoteResponse>) -> bool {
 }
 
 fn become_leader(server: Arc<Mutex<Server>>, rpc_client: &impl RpcClient) {
-    let clone = Arc::clone(&server);
-    let mut server = clone.lock().unwrap();
+    let mut server = server.lock().unwrap();
 
     server.become_leader();
 

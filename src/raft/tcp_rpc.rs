@@ -93,7 +93,7 @@ impl TcpRpcClient {
 impl TcpRpcServer {
     pub fn new(server: Arc<Mutex<Server>>, address: SocketAddrV4) -> Self {
         TcpRpcServer {
-            server: Arc::clone(&server),
+            server: server,
             address: address,
         }
     }
@@ -107,7 +107,7 @@ impl TcpRpcServer {
 
             match stream {
                 Ok(stream) => {
-                    thread::spawn(move || handle_connection(Arc::clone(&server_clone), stream));
+                    thread::spawn(move || handle_connection(server_clone, stream));
                 }
                 Err(e) => {
                     info!("Error while listening to client: {}", e);
@@ -123,14 +123,13 @@ fn handle_connection(server: Arc<Mutex<Server>>, mut stream: TcpStream) {
         stream.read(&mut buffer).unwrap();
 
         let deserialized: RpcMessage = bincode::deserialize(&buffer).unwrap();
-        let server_clone = Arc::clone(&server);
 
         let response = match deserialized {
             RpcMessage::Heartbeat { term, peer_id } => {
-                handle_log_entry(server_clone, term, peer_id)
+                handle_log_entry(Arc::clone(&server), term, peer_id)
             }
             RpcMessage::VoteRequest { term, candidate_id } => {
-                handle_vote_request(server_clone, term, candidate_id)
+                handle_vote_request(Arc::clone(&server), term, candidate_id)
             }
             _ => Vec::new(), // Response messages;
         };
@@ -141,9 +140,8 @@ fn handle_connection(server: Arc<Mutex<Server>>, mut stream: TcpStream) {
 }
 
 fn handle_log_entry(server: Arc<Mutex<Server>>, term: u64, peer_id: String) -> Vec<u8> {
-    let server_clone = Arc::clone(&server);
     let term = crate::raft::core::handle_log_entry(
-        server_clone,
+        server,
         LogEntry::Heartbeat {
             term: term,
             peer_id: peer_id.to_string(),
@@ -159,9 +157,8 @@ fn handle_log_entry(server: Arc<Mutex<Server>>, term: u64, peer_id: String) -> V
 }
 
 fn handle_vote_request(server: Arc<Mutex<Server>>, term: u64, candidate_id: String) -> Vec<u8> {
-    let server_clone = Arc::clone(&server);
     let response = crate::raft::core::handle_vote_request(
-        server_clone,
+        server,
         VoteRequest {
             term: term,
             candidate_id: candidate_id,
